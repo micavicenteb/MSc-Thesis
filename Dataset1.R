@@ -118,6 +118,10 @@ anchors <- FindIntegrationAnchors(object.list = seurat_list_sct, normalization.m
 #Integrate data
 seurat_integrated <- IntegrateData(anchorset = anchors, normalization.method = "SCT")
 
+# Save the Seurat object as an RDS file
+if (!dir.exists("output")) {dir.create("output")}
+saveRDS(seurat_integrated, file = "output/seurat_integrated.rds")
+
 #----------------------CODES I USED TO FIND THE PROBLEM-----------------
 # Confirm all objects have the same anchor features
 all(sapply(seurat_list_sct, function(obj) all(features %in% rownames(obj))))
