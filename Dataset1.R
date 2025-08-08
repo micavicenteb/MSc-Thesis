@@ -1,11 +1,20 @@
 # Install packages (run once)
 install.packages("hdf5r")
+install.packages("sctransform") #sctransform improves speed and memory consumption
+    #this package improves the speed of the learning procedure.
+    install.packages("BiocManager")
+    BiocManager::install("glmGamPoi")
 
 # Load necessary libraries
 library(Seurat)
-library(hdf5r)
+library(patchwork) # Needed for plot_annotation()
+library(dplyr)
 library(ggplot2)
-library(patchwork)  # Needed for plot_annotation()
+library(hdf5r)
+library(glmGamPoi)
+library(sctransform)
+    object <- SCTransform(object, vst.flavor = "v2") # invoke sctransform - requires Seurat>=4.1
+    
 
 # Set working directory (where the data files are located
 setwd("/home/mica/Desktop/Dataset_1/GSE278456_RAW_LGG")
@@ -72,45 +81,59 @@ for (i in seq_along(seurat_list_qc)) {
 
 dev.off()
 
-# Normalize data for each Seurat object
-seurat_list_qc <- lapply(seurat_list_qc, function(seurat_obj) {
-  seurat_obj <- NormalizeData(seurat_obj)
-  return(seurat_obj)
-})
+# Remove datasets that are too small BEFORE processing
+seurat_list_qc <- seurat_list_qc[sapply(seurat_list_qc, ncol) > 50 & sapply(seurat_list_qc, nrow) > 1000]
 
-# Identify variable features (genes) for each object
+
+# Procesamiento completo por objeto Seurat
 seurat_list_qc <- lapply(seurat_list_qc, function(obj) {
-  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  obj <- SCTransform(obj, vst.flavor = "v2", verbose = FALSE) %>%
+    RunPCA(npcs = 20, verbose = FALSE) %>%
+    RunUMAP(reduction = "pca", dims = 1:20, n.neighbors = 30, verbose = FALSE) %>%
+    FindNeighbors(reduction = "pca", dims = 1:20, verbose = FALSE) %>%
+    FindClusters(resolution = 0.5, verbose = FALSE)
   return(obj)
 })
 
-# Show top 20 variable genes from the first sample
-head(VariableFeatures(seurat_list_qc[[1]]), 20)  # Muestra los primeros 20 genes variables
-VariableFeaturePlot(seurat_list_qc[[1]])
-
-
-# Select integration features across all samples
-features <- SelectIntegrationFeatures(object.list = seurat_list_qc, nfeatures = 3000)
-
-# Scale data and run PCA on each object using the selected features
-seurat_list_qc <- lapply(seurat_list_qc, function(obj) {
-  obj <- ScaleData(obj, features = features, verbose = FALSE)
-  obj <- RunPCA(obj, features = features, verbose = FALSE)
-  return(obj)
-})
-
-#PROBLEM!!!!: check cells and genes for each seurat obj
-for (sample_name in names(seurat_list_qc)) {
-  obj <- seurat_list_qc[[sample_name]]
-  cat("Sample:", sample_name, "\n")
-  cat("# genes:", nrow(obj), "\n")
-  cat("# cells:", ncol(obj), "\n\n")
+#crear carpeta
+dir.create("Processed_Seurat_Objects", showWarnings = FALSE)
+# Guardar los objetos procesados con SCTransform
+for (name in names(seurat_list_qc)) {
+  saveRDS(seurat_list_qc[[name]], file = file.path("Processed_Seurat_Objects", paste0(name, ".rds")))
 }
 
+#objeto para integracion
+seurat_list_sct <- lapply(seurat_list_qc, function(obj) {SCTransform(obj, vst.flavor = "v2", verbose = FALSE)})
 
-# Find integration anchors (to align datasets)
-anchors <- FindIntegrationAnchors(object.list = seurat_list_qc, anchor.features = features)
+#INTEGRATION
+#Select integration features using only SCT-normalized objects (seurat_list_sct)
+features <- SelectIntegrationFeatures(object.list = seurat_list_sct, nfeatures = 3000)
 
-# Integrate data into a single Seurat object
-seurat_integrated <- IntegrateData(anchorset = anchors)
+# Prepare SCT objects for integration
+seurat_list_sct <- PrepSCTIntegration(object.list = seurat_list_sct, anchor.features = features)
 
+#Find integration anchors
+anchors <- FindIntegrationAnchors(object.list = seurat_list_sct, normalization.method = "SCT", anchor.features = features)
+
+#Integrate data
+seurat_integrated <- IntegrateData(anchorset = anchors, normalization.method = "SCT")
+
+#----------------------CODES I USED TO FIND THE PROBLEM-----------------
+# Confirm all objects have the same anchor features
+all(sapply(seurat_list_sct, function(obj) all(features %in% rownames(obj))))
+
+# Check cell counts for each object
+sapply(seurat_list_sct, ncol)
+
+# Check feature counts for each object
+sapply(seurat_list_sct, nrow)
+
+# Print cell and gene counts per sample
+for (sample_name in names(seurat_list_sct)) {
+  obj <- seurat_list_sct[[sample_name]]
+  cat("Sample:", sample_name, "\n")
+  cat("# genes:", nrow(obj), "\n")
+  cat("# cells:", ncol(obj), "\n\n")}
+
+#use dims ≤ number of PCs possible for thesmallest dataset
+max_dims <- min(30, min(sapply(seurat_list_sct, function(x) min(50, ncol(x) - 1))))
